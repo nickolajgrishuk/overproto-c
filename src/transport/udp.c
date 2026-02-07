@@ -7,30 +7,66 @@
  */
 
 #include "udp.h"
+#include <string.h>
+#include <stdlib.h>
+#include <errno.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <string.h>
-#include <stdlib.h>
-#include <errno.h>
+#endif
 
 #define OP_UDP_RECV_BUFFER_SIZE (64 * 1024)  /* 64KB буфер для приёма */
 
-int op_udp_bind(uint16_t port)
+#ifdef _WIN32
+static void op_set_socket_errno_from_last_error(void)
 {
-    int fd;
+    switch (WSAGetLastError()) {
+    case WSAEWOULDBLOCK: errno = EWOULDBLOCK; break;
+    case WSAEINTR: errno = EINTR; break;
+    case WSAECONNRESET: errno = ECONNRESET; break;
+    case WSAECONNABORTED: errno = ECONNABORTED; break;
+    case WSAENOTCONN: errno = ENOTCONN; break;
+    case WSAETIMEDOUT: errno = ETIMEDOUT; break;
+    case WSAEADDRINUSE: errno = EADDRINUSE; break;
+    case WSAEADDRNOTAVAIL: errno = EADDRNOTAVAIL; break;
+    case WSAECONNREFUSED: errno = ECONNREFUSED; break;
+    case WSAEHOSTUNREACH: errno = EHOSTUNREACH; break;
+    case WSAENETUNREACH: errno = ENETUNREACH; break;
+    case WSAENOBUFS: errno = ENOBUFS; break;
+    default: errno = EIO; break;
+    }
+}
+#endif
+
+op_socket_t op_udp_bind(uint16_t port)
+{
+    op_socket_t fd;
     struct sockaddr_in addr;
     int opt = 1;
 
     fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
+    if (fd == OP_INVALID_SOCKET) {
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         OP_LOG_ERROR("socket() failed: %s", strerror(errno));
-        return -1;
+        return OP_INVALID_SOCKET;
     }
 
     /* Устанавливаем SO_REUSEADDR для переиспользования порта */
+#ifdef _WIN32
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt)) < 0) {
+#else
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+#endif
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         OP_LOG_WARN("setsockopt(SO_REUSEADDR) failed: %s", strerror(errno));
         /* Не критично, продолжаем */
     }
@@ -41,29 +77,35 @@ int op_udp_bind(uint16_t port)
     addr.sin_port = htons(port);
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         OP_LOG_ERROR("bind() failed on port %u: %s", port, strerror(errno));
-        close(fd);
-        return -1;
+        op_udp_close(fd);
+        return OP_INVALID_SOCKET;
     }
 
     OP_LOG_INFO("UDP server bound to port %u", port);
     return fd;
 }
 
-int op_udp_connect(const char *host, uint16_t port)
+op_socket_t op_udp_connect(const char *host, uint16_t port)
 {
-    int fd;
+    op_socket_t fd;
     struct sockaddr_in addr;
 
     if (host == NULL) {
         errno = EINVAL;
-        return -1;
+        return OP_INVALID_SOCKET;
     }
 
     fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
+    if (fd == OP_INVALID_SOCKET) {
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         OP_LOG_ERROR("socket() failed: %s", strerror(errno));
-        return -1;
+        return OP_INVALID_SOCKET;
     }
 
     memset(&addr, 0, sizeof(addr));
@@ -72,26 +114,29 @@ int op_udp_connect(const char *host, uint16_t port)
 
     if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
         OP_LOG_ERROR("Invalid IP address: %s", host);
-        close(fd);
+        op_udp_close(fd);
         errno = EINVAL;
-        return -1;
+        return OP_INVALID_SOCKET;
     }
 
     /* connect() на UDP позволяет использовать send/recv вместо sendto/recvfrom */
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         OP_LOG_ERROR("connect() failed to %s:%u: %s", host, port, strerror(errno));
-        close(fd);
-        return -1;
+        op_udp_close(fd);
+        return OP_INVALID_SOCKET;
     }
 
     OP_LOG_INFO("UDP connected to %s:%u", host, port);
     return fd;
 }
 
-int op_udp_connection_init(OpUdpConnection *conn, int fd,
+int op_udp_connection_init(OpUdpConnection *conn, op_socket_t fd,
                            const struct sockaddr_in *addr, size_t mtu)
 {
-    if (conn == NULL || fd < 0) {
+    if (conn == NULL || fd == OP_INVALID_SOCKET) {
         errno = EINVAL;
         return -1;
     }
@@ -110,7 +155,7 @@ int op_udp_connection_init(OpUdpConnection *conn, int fd,
     return 0;
 }
 
-ssize_t op_udp_send(int fd, const OverPacketHeader *hdr, const void *data,
+ssize_t op_udp_send(op_socket_t fd, const OverPacketHeader *hdr, const void *data,
                     const struct sockaddr_in *addr, socklen_t addr_len)
 {
     uint8_t *send_buf = NULL;
@@ -118,7 +163,7 @@ ssize_t op_udp_send(int fd, const OverPacketHeader *hdr, const void *data,
     ssize_t result;
     ssize_t bytes_sent;
 
-    if (fd < 0 || hdr == NULL) {
+    if (fd == OP_INVALID_SOCKET || hdr == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -151,16 +196,19 @@ ssize_t op_udp_send(int fd, const OverPacketHeader *hdr, const void *data,
     /* Отправляем датаграмму */
     if (addr != NULL && addr_len > 0) {
         /* Используем sendto для указанного адреса */
-        bytes_sent = sendto(fd, send_buf, (size_t)result, 0,
+        bytes_sent = sendto(fd, (const char *)send_buf, (int)result, 0,
                            (const struct sockaddr *)addr, addr_len);
     } else {
         /* Используем send для подключённого сокета */
-        bytes_sent = send(fd, send_buf, (size_t)result, 0);
+        bytes_sent = send(fd, (const char *)send_buf, (int)result, 0);
     }
 
     free(send_buf);
 
     if (bytes_sent < 0) {
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             OP_LOG_WARN("send() would block");
         } else {
@@ -176,14 +224,14 @@ ssize_t op_udp_send(int fd, const OverPacketHeader *hdr, const void *data,
     return bytes_sent;
 }
 
-int op_udp_recv(int fd, OverPacketHeader **hdr, void **data, size_t *data_len,
+int op_udp_recv(op_socket_t fd, OverPacketHeader **hdr, void **data, size_t *data_len,
                 struct sockaddr_in *addr, socklen_t *addr_len)
 {
     uint8_t *recv_buf = NULL;
     ssize_t n;
     int result;
 
-    if (fd < 0 || hdr == NULL || data == NULL || data_len == NULL) {
+    if (fd == OP_INVALID_SOCKET || hdr == NULL || data == NULL || data_len == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -205,15 +253,18 @@ int op_udp_recv(int fd, OverPacketHeader **hdr, void **data, size_t *data_len,
     if (addr != NULL && addr_len != NULL) {
         /* Используем recvfrom для получения адреса отправителя */
         socklen_t addr_len_val = (socklen_t)(*addr_len);
-        n = recvfrom(fd, recv_buf, OP_UDP_RECV_BUFFER_SIZE, 0,
+        n = recvfrom(fd, (char *)recv_buf, OP_UDP_RECV_BUFFER_SIZE, 0,
                      (struct sockaddr *)addr, &addr_len_val);
         *addr_len = addr_len_val;
     } else {
         /* Используем recv для подключённого сокета */
-        n = recv(fd, recv_buf, OP_UDP_RECV_BUFFER_SIZE, 0);
+        n = recv(fd, (char *)recv_buf, OP_UDP_RECV_BUFFER_SIZE, 0);
     }
 
     if (n < 0) {
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             OP_LOG_WARN("recv() would block");
         } else {
@@ -250,14 +301,19 @@ int op_udp_recv(int fd, OverPacketHeader **hdr, void **data, size_t *data_len,
     return 0;
 }
 
-int op_udp_close(int fd)
+int op_udp_close(op_socket_t fd)
 {
-    if (fd < 0) {
+    if (fd == OP_INVALID_SOCKET) {
         errno = EINVAL;
         return -1;
     }
 
+#ifdef _WIN32
+    if (closesocket(fd) != 0) {
+        op_set_socket_errno_from_last_error();
+#else
     if (close(fd) < 0) {
+#endif
         OP_LOG_ERROR("close() failed: %s", strerror(errno));
         return -1;
     }
@@ -265,19 +321,23 @@ int op_udp_close(int fd)
     return 0;
 }
 
-size_t op_udp_get_mtu(int fd)
+size_t op_udp_get_mtu(op_socket_t fd)
 {
     int mtu_value;
     socklen_t len = sizeof(mtu_value);
 
-    if (fd < 0) {
+    if (fd == OP_INVALID_SOCKET) {
         errno = EINVAL;
         return 0;
     }
 
     /* Пытаемся получить MTU через getsockopt */
 #ifdef IP_MTU
+#ifdef _WIN32
+    if (getsockopt(fd, IPPROTO_IP, IP_MTU, (char *)&mtu_value, &len) == 0) {
+#else
     if (getsockopt(fd, IPPROTO_IP, IP_MTU, &mtu_value, &len) == 0) {
+#endif
         if (mtu_value > 0) {
             return (size_t)mtu_value;
         }
@@ -287,4 +347,3 @@ size_t op_udp_get_mtu(int fd)
     /* Если не удалось, возвращаем значение по умолчанию */
     return OP_FRAG_MTU_DEFAULT;
 }
-

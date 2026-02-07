@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 void recv_handler(uint32_t stream_id, uint8_t opcode,
                   const void *data, size_t len, void *ctx)
@@ -41,8 +40,8 @@ int main(int argc, char *argv[])
     op_set_handler(recv_handler, NULL);
 
     /* Создание TCP сервера */
-    int server_fd = op_tcp_listen(port);
-    if (server_fd < 0) {
+    op_socket_t server_fd = op_tcp_listen(port);
+    if (server_fd == OP_INVALID_SOCKET) {
         fprintf(stderr, "Failed to listen on port %u\n", port);
         op_shutdown();
         return 1;
@@ -51,8 +50,8 @@ int main(int argc, char *argv[])
     printf("Server listening on port %u\n", port);
 
     /* Принятие соединения */
-    int client_fd = op_tcp_accept(server_fd);
-    if (client_fd < 0) {
+    op_socket_t client_fd = op_tcp_accept(server_fd);
+    if (client_fd == OP_INVALID_SOCKET) {
         fprintf(stderr, "Failed to accept connection\n");
         op_tcp_close(server_fd);
         op_shutdown();
@@ -93,4 +92,3 @@ int main(int argc, char *argv[])
 
     return 0;
 }
-

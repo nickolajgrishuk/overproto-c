@@ -6,7 +6,12 @@
 #include "packet.h"
 #include "crc32.h"
 #include <string.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
+#endif
 #include <time.h>
 #include <stdlib.h>
 
@@ -274,4 +279,3 @@ int op_process_payload_flags(const OverPacketHeader *hdr, void **data, size_t *d
 
     return 0;
 }
-

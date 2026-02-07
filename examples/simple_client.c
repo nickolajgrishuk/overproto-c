@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 int main(int argc, char *argv[])
 {
@@ -31,8 +30,8 @@ int main(int argc, char *argv[])
     }
 
     /* Подключение к серверу */
-    int fd = op_tcp_connect(host, port);
-    if (fd < 0) {
+    op_socket_t fd = op_tcp_connect(host, port);
+    if (fd == OP_INVALID_SOCKET) {
         fprintf(stderr, "Failed to connect to %s:%u\n", host, port);
         op_shutdown();
         return 1;
@@ -57,4 +56,3 @@ int main(int argc, char *argv[])
 
     return 0;
 }
-

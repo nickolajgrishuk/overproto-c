@@ -17,12 +17,17 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <time.h>
 #include "../core/common.h"
 #include "../core/packet.h"
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#endif
 
 /* Константы надёжности */
 #define OP_RELIABLE_WINDOW_SIZE     32
@@ -75,7 +80,7 @@ typedef struct {
  * @brief Контекст надёжной передачи
  */
 typedef struct {
-    int fd;                     /* File descriptor UDP сокета */
+    op_socket_t fd;             /* Socket descriptor */
     struct sockaddr_in addr;    /* Адрес получателя/отправителя */
     socklen_t addr_len;         /* Длина адреса */
     
@@ -113,7 +118,7 @@ typedef struct {
  * @return 0 при успехе, -1 при ошибке
  * @note Thread-safe: no (ctx должен быть инициализирован из одного потока)
  */
-int op_reliable_init(OpReliableCtx *ctx, int fd,
+int op_reliable_init(OpReliableCtx *ctx, op_socket_t fd,
                      const struct sockaddr_in *addr, socklen_t addr_len);
 
 /**
@@ -176,4 +181,3 @@ int op_reliable_process_ack(OpReliableCtx *ctx, uint32_t ack_seq);
 void op_reliable_cleanup(OpReliableCtx *ctx);
 
 #endif /* OVERPROTO_RELIABLE_H */
-

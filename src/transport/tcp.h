@@ -8,7 +8,6 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <sys/types.h>
 #include "../core/common.h"
 #include "../core/packet.h"
 
@@ -27,7 +26,7 @@ typedef enum {
  * @brief TCP соединение
  */
 typedef struct {
-    int fd;                         /* File descriptor сокета */
+    op_socket_t fd;                 /* Socket descriptor */
     OpTcpRecvState recv_state;      /* Состояние приёма */
     uint8_t *recv_buffer;           /* Буфер для чтения */
     size_t recv_buffer_size;        /* Размер буфера */
@@ -40,7 +39,7 @@ typedef struct {
  * @return File descriptor серверного сокета при успехе, -1 при ошибке
  * @note Thread-safe: yes
  */
-int op_tcp_listen(uint16_t port);
+op_socket_t op_tcp_listen(uint16_t port);
 
 /**
  * @brief Принятие соединения на серверном сокете
@@ -49,7 +48,7 @@ int op_tcp_listen(uint16_t port);
  * @note Thread-safe: yes (если server_fd не разделяется между потоками)
  * @note Блокирующий вызов. Для non-blocking использовать select/poll на server_fd
  */
-int op_tcp_accept(int server_fd);
+op_socket_t op_tcp_accept(op_socket_t server_fd);
 
 /**
  * @brief Подключение к TCP серверу
@@ -58,7 +57,7 @@ int op_tcp_accept(int server_fd);
  * @return File descriptor соединения при успехе, -1 при ошибке
  * @note Thread-safe: yes
  */
-int op_tcp_connect(const char *host, uint16_t port);
+op_socket_t op_tcp_connect(const char *host, uint16_t port);
 
 /**
  * @brief Инициализация структуры TCP соединения
@@ -67,7 +66,7 @@ int op_tcp_connect(const char *host, uint16_t port);
  * @return 0 при успехе, -1 при ошибке
  * @note Thread-safe: no (conn должен использоваться из одного потока)
  */
-int op_tcp_connection_init(OpTcpConnection *conn, int fd);
+int op_tcp_connection_init(OpTcpConnection *conn, op_socket_t fd);
 
 /**
  * @brief Очистка ресурсов TCP соединения
@@ -85,7 +84,7 @@ void op_tcp_connection_cleanup(OpTcpConnection *conn);
  * @return Количество отправленных байт при успехе, -1 при ошибке
  * @note Thread-safe: yes (если fd не разделяется между потоками для записи)
  */
-ssize_t op_tcp_send(int fd, const OverPacketHeader *hdr, const void *data);
+ssize_t op_tcp_send(op_socket_t fd, const OverPacketHeader *hdr, const void *data);
 
 /**
  * @brief Приём пакета через TCP (с state machine)
@@ -109,7 +108,6 @@ int op_tcp_recv(OpTcpConnection *conn,
  * @return 0 при успехе, -1 при ошибке
  * @note Thread-safe: yes
  */
-int op_tcp_close(int fd);
+int op_tcp_close(op_socket_t fd);
 
 #endif /* OVERPROTO_TCP_H */
-

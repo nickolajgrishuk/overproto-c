@@ -10,7 +10,6 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <sys/types.h>
 #include "../core/common.h"
 #include "../core/packet.h"
 #include "../transport/tcp.h"
@@ -68,7 +67,7 @@ void op_set_handler(op_recv_cb callback, void *ctx);
  * 
  * Удобная функция-обёртка для создания и отправки пакета
  */
-ssize_t op_send(int fd, uint32_t stream_id, uint8_t opcode, uint8_t proto,
+ssize_t op_send(op_socket_t fd, uint32_t stream_id, uint8_t opcode, uint8_t proto,
                 const void *data, size_t len, uint8_t flags);
 
 /**
@@ -77,7 +76,7 @@ ssize_t op_send(int fd, uint32_t stream_id, uint8_t opcode, uint8_t proto,
  * @return File descriptor UDP сокета при успехе, -1 при ошибке
  * @note Thread-safe: yes
  */
-int op_udp_bind(uint16_t port);
+op_socket_t op_udp_bind(uint16_t port);
 
 /**
  * @brief Создание UDP сокета с подключением к удалённому адресу
@@ -86,9 +85,8 @@ int op_udp_bind(uint16_t port);
  * @return File descriptor UDP сокета при успехе, -1 при ошибке
  * @note Thread-safe: yes
  */
-int op_udp_connect(const char *host, uint16_t port);
+op_socket_t op_udp_connect(const char *host, uint16_t port);
 
 /* Функция op_set_encryption_key объявлена в crypto.h */
 
 #endif /* OVERPROTO_H */
-

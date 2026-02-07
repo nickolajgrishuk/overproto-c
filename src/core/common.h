@@ -10,6 +10,17 @@
 #include <stddef.h>
 #include <errno.h>
 #include <stdio.h>
+#include <sys/types.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef SOCKET op_socket_t;
+#define OP_INVALID_SOCKET INVALID_SOCKET
+#else
+typedef int op_socket_t;
+#define OP_INVALID_SOCKET (-1)
+#endif
 
 /* Константы протокола */
 #define OP_MAGIC               0xABCD
@@ -83,4 +94,3 @@ static inline void op_config_init(OpConfig *cfg)
 }
 
 #endif /* OVERPROTO_COMMON_H */
-
