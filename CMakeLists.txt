@@ -22,8 +22,10 @@ set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -fno-unwind-tables")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -fno-asynchronous-unwind-tables")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -fvisibility=hidden")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -fmerge-constants")
-set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,--gc-sections -Wl,-z,relro -Wl,-z,now")
-set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} -Wl,--gc-sections -Wl,-z,relro -Wl,-z,now")
+if(NOT WIN32)
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -Wl,--gc-sections -Wl,-z,relro -Wl,-z,now")
+    set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} -Wl,--gc-sections -Wl,-z,relro -Wl,-z,now")
+endif()
 
 option(OVERPROTO_STRIP_SYMBOLS "Strip symbols from release builds (reduces size)" OFF)
 if(OVERPROTO_STRIP_SYMBOLS)
@@ -91,6 +93,10 @@ target_link_libraries(overproto
     PUBLIC
         Threads::Threads
 )
+
+if(WIN32)
+    target_link_libraries(overproto PUBLIC ws2_32)
+endif()
 
 install(FILES ${OVERPROTO_PUBLIC_HEADERS}
     DESTINATION include/overproto
