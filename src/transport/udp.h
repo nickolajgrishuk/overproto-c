@@ -11,17 +11,22 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include "../core/common.h"
 #include "../core/packet.h"
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#endif
 
 /**
  * @brief UDP соединение/сокет
  */
 typedef struct {
-    int fd;                     /* File descriptor UDP сокета */
+    op_socket_t fd;             /* Socket descriptor */
     struct sockaddr_in addr;    /* Адрес получателя/отправителя */
     socklen_t addr_len;         /* Длина адреса */
     size_t mtu;                 /* MTU для этого соединения */
@@ -33,7 +38,7 @@ typedef struct {
  * @return File descriptor UDP сокета при успехе, -1 при ошибке
  * @note Thread-safe: yes
  */
-int op_udp_bind(uint16_t port);
+op_socket_t op_udp_bind(uint16_t port);
 
 /**
  * @brief Создание UDP сокета с подключением к удалённому адресу
@@ -43,7 +48,7 @@ int op_udp_bind(uint16_t port);
  * @note Thread-safe: yes
  * @note connect() на UDP сокете позволяет использовать send/recv вместо sendto/recvfrom
  */
-int op_udp_connect(const char *host, uint16_t port);
+op_socket_t op_udp_connect(const char *host, uint16_t port);
 
 /**
  * @brief Инициализация UDP соединения из файлового дескриптора
@@ -54,7 +59,7 @@ int op_udp_connect(const char *host, uint16_t port);
  * @return 0 при успехе, -1 при ошибке
  * @note Thread-safe: no (conn должен использоваться из одного потока)
  */
-int op_udp_connection_init(OpUdpConnection *conn, int fd,
+int op_udp_connection_init(OpUdpConnection *conn, op_socket_t fd,
                            const struct sockaddr_in *addr, size_t mtu);
 
 /**
@@ -68,7 +73,7 @@ int op_udp_connection_init(OpUdpConnection *conn, int fd,
  * @note Thread-safe: yes (если fd не разделяется между потоками для записи)
  * @note Если пакет превышает MTU, используйте op_fragment_packet() перед отправкой
  */
-ssize_t op_udp_send(int fd, const OverPacketHeader *hdr, const void *data,
+ssize_t op_udp_send(op_socket_t fd, const OverPacketHeader *hdr, const void *data,
                     const struct sockaddr_in *addr, socklen_t addr_len);
 
 /**
@@ -86,7 +91,7 @@ ssize_t op_udp_send(int fd, const OverPacketHeader *hdr, const void *data,
  * Принимает один UDP датаграмму и десериализует пакет.
  * Для фрагментированных пакетов используйте op_fragment_add().
  */
-int op_udp_recv(int fd, OverPacketHeader **hdr, void **data, size_t *data_len,
+int op_udp_recv(op_socket_t fd, OverPacketHeader **hdr, void **data, size_t *data_len,
                 struct sockaddr_in *addr, socklen_t *addr_len);
 
 /**
@@ -95,7 +100,7 @@ int op_udp_recv(int fd, OverPacketHeader **hdr, void **data, size_t *data_len,
  * @return 0 при успехе, -1 при ошибке
  * @note Thread-safe: yes
  */
-int op_udp_close(int fd);
+int op_udp_close(op_socket_t fd);
 
 /**
  * @brief Получить MTU для соединения
@@ -106,7 +111,6 @@ int op_udp_close(int fd);
  * Пытается определить MTU через getsockopt(IP_MTU), 
  * если не удаётся, возвращает значение по умолчанию (1400).
  */
-size_t op_udp_get_mtu(int fd);
+size_t op_udp_get_mtu(op_socket_t fd);
 
 #endif /* OVERPROTO_UDP_H */
-

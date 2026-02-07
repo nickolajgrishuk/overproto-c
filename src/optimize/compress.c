@@ -11,16 +11,32 @@
 #include "../core/common.h"
 #include <string.h>
 #include <stdlib.h>
+#ifdef OVERPROTO_USE_ZLIB
 #include <zlib.h>
+#endif
+
+#ifdef _WIN32
+#include <windows.h>
+#define OP_MUTEX_TYPE SRWLOCK
+#define OP_MUTEX_INITIALIZER SRWLOCK_INIT
+#define OP_MUTEX_LOCK(mtx) AcquireSRWLockExclusive((mtx))
+#define OP_MUTEX_UNLOCK(mtx) ReleaseSRWLockExclusive((mtx))
+#else
 #include <pthread.h>
+#define OP_MUTEX_TYPE pthread_mutex_t
+#define OP_MUTEX_INITIALIZER PTHREAD_MUTEX_INITIALIZER
+#define OP_MUTEX_LOCK(mtx) pthread_mutex_lock((mtx))
+#define OP_MUTEX_UNLOCK(mtx) pthread_mutex_unlock((mtx))
+#endif
 
 /* Глобальный порог компрессии */
 static size_t g_compress_threshold = OP_COMPRESS_THRESHOLD;
-static pthread_mutex_t g_threshold_mutex = PTHREAD_MUTEX_INITIALIZER;
+static OP_MUTEX_TYPE g_threshold_mutex = OP_MUTEX_INITIALIZER;
 
 int op_compress(const void *input, size_t input_len,
                 void **output, size_t *output_len)
 {
+#ifdef OVERPROTO_USE_ZLIB
     z_stream strm;
     uint8_t *compressed = NULL;
     size_t compressed_size;
@@ -112,11 +128,20 @@ int op_compress(const void *input, size_t input_len,
                  (double)compressed_size * 100.0 / (double)input_len);
 
     return 0;
+#else
+    (void)input;
+    (void)input_len;
+    (void)output;
+    (void)output_len;
+    errno = ENOTSUP;
+    return -1;
+#endif
 }
 
 int op_decompress(const void *input, size_t input_len,
                   void **output, size_t *output_len)
 {
+#ifdef OVERPROTO_USE_ZLIB
     z_stream strm;
     uint8_t *decompressed = NULL;
     size_t decompressed_size;
@@ -218,13 +243,21 @@ int op_decompress(const void *input, size_t input_len,
                  input_len, decompressed_size);
 
     return 0;
+#else
+    (void)input;
+    (void)input_len;
+    (void)output;
+    (void)output_len;
+    errno = ENOTSUP;
+    return -1;
+#endif
 }
 
 void op_set_compress_threshold(size_t threshold)
 {
-    pthread_mutex_lock(&g_threshold_mutex);
+    OP_MUTEX_LOCK(&g_threshold_mutex);
     g_compress_threshold = threshold;
-    pthread_mutex_unlock(&g_threshold_mutex);
+    OP_MUTEX_UNLOCK(&g_threshold_mutex);
     
     OP_LOG_INFO("Compression threshold set to %zu bytes", threshold);
 }
@@ -233,10 +266,9 @@ size_t op_get_compress_threshold(void)
 {
     size_t threshold;
     
-    pthread_mutex_lock(&g_threshold_mutex);
+    OP_MUTEX_LOCK(&g_threshold_mutex);
     threshold = g_compress_threshold;
-    pthread_mutex_unlock(&g_threshold_mutex);
+    OP_MUTEX_UNLOCK(&g_threshold_mutex);
     
     return threshold;
 }
-

@@ -13,19 +13,55 @@
  * - Используем формулу: RTO = SRTT + 4*RTTVAR
  */
 
-#define _POSIX_C_SOURCE 200112L
 #include "reliable.h"
 #include "udp.h"
 #include "../core/fragment.h"
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <time.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#define OP_MUTEX_TYPE CRITICAL_SECTION
+#define OP_MUTEX_LOCK(mtx) EnterCriticalSection((mtx))
+#define OP_MUTEX_UNLOCK(mtx) LeaveCriticalSection((mtx))
+#define OP_MUTEX_INIT(mtx) (InitializeCriticalSection((mtx)), 0)
+#define OP_MUTEX_DESTROY(mtx) DeleteCriticalSection((mtx))
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 #include <pthread.h>
+#define OP_MUTEX_TYPE pthread_mutex_t
+#define OP_MUTEX_LOCK(mtx) pthread_mutex_lock((mtx))
+#define OP_MUTEX_UNLOCK(mtx) pthread_mutex_unlock((mtx))
+#define OP_MUTEX_INIT(mtx) pthread_mutex_init((mtx), NULL)
+#define OP_MUTEX_DESTROY(mtx) pthread_mutex_destroy((mtx))
+#endif
+
+#ifdef _WIN32
+static void op_set_socket_errno_from_last_error(void)
+{
+    switch (WSAGetLastError()) {
+    case WSAEWOULDBLOCK: errno = EWOULDBLOCK; break;
+    case WSAEINTR: errno = EINTR; break;
+    case WSAECONNRESET: errno = ECONNRESET; break;
+    case WSAECONNABORTED: errno = ECONNABORTED; break;
+    case WSAENOTCONN: errno = ENOTCONN; break;
+    case WSAETIMEDOUT: errno = ETIMEDOUT; break;
+    case WSAEADDRINUSE: errno = EADDRINUSE; break;
+    case WSAEADDRNOTAVAIL: errno = EADDRNOTAVAIL; break;
+    case WSAECONNREFUSED: errno = ECONNREFUSED; break;
+    case WSAEHOSTUNREACH: errno = EHOSTUNREACH; break;
+    case WSAENETUNREACH: errno = ENETUNREACH; break;
+    case WSAENOBUFS: errno = ENOBUFS; break;
+    default: errno = EIO; break;
+    }
+}
+#endif
 
 /* Вспомогательные функции */
 
@@ -85,12 +121,12 @@ static void update_rtt(OpRttStats *rtt, uint32_t measured_rtt_ms)
     rtt->samples_count++;
 }
 
-int op_reliable_init(OpReliableCtx *ctx, int fd,
+int op_reliable_init(OpReliableCtx *ctx, op_socket_t fd,
                      const struct sockaddr_in *addr, socklen_t addr_len)
 {
-    pthread_mutex_t *mutex = NULL;
+    OP_MUTEX_TYPE *mutex = NULL;
 
-    if (ctx == NULL || fd < 0) {
+    if (ctx == NULL || fd == OP_INVALID_SOCKET) {
         errno = EINVAL;
         return -1;
     }
@@ -134,14 +170,14 @@ int op_reliable_init(OpReliableCtx *ctx, int fd,
     ctx->in_slow_start = 1;
 
     /* Создаём мьютекс */
-    mutex = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
+    mutex = (OP_MUTEX_TYPE *)malloc(sizeof(OP_MUTEX_TYPE));
     if (mutex == NULL) {
         OP_LOG_ERROR("Failed to allocate memory for mutex");
         errno = ENOMEM;
         return -1;
     }
 
-    if (pthread_mutex_init(mutex, NULL) != 0) {
+    if (OP_MUTEX_INIT(mutex) != 0) {
         OP_LOG_ERROR("Failed to initialize mutex");
         free(mutex);
         errno = EAGAIN;
@@ -156,7 +192,7 @@ int op_reliable_init(OpReliableCtx *ctx, int fd,
 int op_reliable_send(OpReliableCtx *ctx, const OverPacketHeader *hdr,
                      const void *data)
 {
-    pthread_mutex_t *mutex;
+    OP_MUTEX_TYPE *mutex;
     uint32_t seq;
     uint32_t window_idx;
     OpWindowSlot *slot;
@@ -171,13 +207,13 @@ int op_reliable_send(OpReliableCtx *ctx, const OverPacketHeader *hdr,
         return -1;
     }
 
-    mutex = (pthread_mutex_t *)ctx->mutex;
+    mutex = (OP_MUTEX_TYPE *)ctx->mutex;
     if (mutex == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    pthread_mutex_lock(mutex);
+    OP_MUTEX_LOCK(mutex);
 
     /* Проверяем, есть ли место в окне (с учётом congestion window) */
     uint32_t effective_window = (ctx->cwnd < ctx->window_size) ? ctx->cwnd : ctx->window_size;
@@ -185,7 +221,7 @@ int op_reliable_send(OpReliableCtx *ctx, const OverPacketHeader *hdr,
     
     if (unacked_packets >= effective_window) {
         OP_LOG_DEBUG("Congestion window full: %u/%u packets", unacked_packets, effective_window);
-        pthread_mutex_unlock(mutex);
+        OP_MUTEX_UNLOCK(mutex);
         errno = EAGAIN;
         return -1;
     }
@@ -193,7 +229,7 @@ int op_reliable_send(OpReliableCtx *ctx, const OverPacketHeader *hdr,
     /* Проверяем также физический размер окна */
     if (!is_in_window(ctx->next_seq, ctx->send_base, ctx->window_size)) {
         OP_LOG_WARN("Window full, waiting for ACK");
-        pthread_mutex_unlock(mutex);
+        OP_MUTEX_UNLOCK(mutex);
         errno = EAGAIN;
         return -1;
     }
@@ -206,7 +242,7 @@ int op_reliable_send(OpReliableCtx *ctx, const OverPacketHeader *hdr,
     /* Проверяем, что слот пуст */
     if (slot->state != OP_PKT_STATE_EMPTY) {
         OP_LOG_ERROR("Window slot %u not empty", window_idx);
-        pthread_mutex_unlock(mutex);
+        OP_MUTEX_UNLOCK(mutex);
         errno = EINVAL;
         return -1;
     }
@@ -221,7 +257,7 @@ int op_reliable_send(OpReliableCtx *ctx, const OverPacketHeader *hdr,
     serialized = (uint8_t *)malloc(serialized_size);
     if (serialized == NULL) {
         OP_LOG_ERROR("Failed to allocate memory for serialized packet");
-        pthread_mutex_unlock(mutex);
+        OP_MUTEX_UNLOCK(mutex);
         errno = ENOMEM;
         return -1;
     }
@@ -229,7 +265,7 @@ int op_reliable_send(OpReliableCtx *ctx, const OverPacketHeader *hdr,
     result = op_serialize(&hdr_copy, data, serialized, serialized_size);
     if (result < 0) {
         free(serialized);
-        pthread_mutex_unlock(mutex);
+        OP_MUTEX_UNLOCK(mutex);
         return -1;
     }
 
@@ -237,7 +273,7 @@ int op_reliable_send(OpReliableCtx *ctx, const OverPacketHeader *hdr,
     slot->header = (OverPacketHeader *)malloc(sizeof(OverPacketHeader));
     if (slot->header == NULL) {
         free(serialized);
-        pthread_mutex_unlock(mutex);
+        OP_MUTEX_UNLOCK(mutex);
         errno = ENOMEM;
         return -1;
     }
@@ -249,7 +285,7 @@ int op_reliable_send(OpReliableCtx *ctx, const OverPacketHeader *hdr,
             free(serialized);
             free(slot->header);
             slot->header = NULL;
-            pthread_mutex_unlock(mutex);
+            OP_MUTEX_UNLOCK(mutex);
             errno = ENOMEM;
             return -1;
         }
@@ -271,9 +307,12 @@ int op_reliable_send(OpReliableCtx *ctx, const OverPacketHeader *hdr,
     slot->sent_at = now;
 
     /* Отправляем пакет */
-    ssize_t sent = sendto(ctx->fd, serialized, slot->serialized_len, 0,
+    ssize_t sent = sendto(ctx->fd, (const char *)serialized, (int)slot->serialized_len, 0,
                           (const struct sockaddr *)&ctx->addr, ctx->addr_len);
     if (sent < 0) {
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         OP_LOG_ERROR("sendto() failed: %s", strerror(errno));
         slot->state = OP_PKT_STATE_EMPTY;
         free(serialized);
@@ -282,20 +321,20 @@ int op_reliable_send(OpReliableCtx *ctx, const OverPacketHeader *hdr,
             free(slot->data);
         }
         memset(slot, 0, sizeof(OpWindowSlot));
-        pthread_mutex_unlock(mutex);
+        OP_MUTEX_UNLOCK(mutex);
         return -1;
     }
 
     ctx->next_seq++;
 
-    pthread_mutex_unlock(mutex);
+    OP_MUTEX_UNLOCK(mutex);
     return 0;
 }
 
 int op_reliable_recv(OpReliableCtx *ctx, OverPacketHeader **hdr,
                      void **data, size_t *data_len)
 {
-    pthread_mutex_t *mutex;
+    OP_MUTEX_TYPE *mutex;
     OverPacketHeader *recv_hdr = NULL;
     void *recv_data = NULL;
     size_t recv_data_len = 0;
@@ -311,7 +350,7 @@ int op_reliable_recv(OpReliableCtx *ctx, OverPacketHeader **hdr,
         return -1;
     }
 
-    mutex = (pthread_mutex_t *)ctx->mutex;
+    mutex = (OP_MUTEX_TYPE *)ctx->mutex;
     if (mutex == NULL) {
         errno = EINVAL;
         return -1;
@@ -334,62 +373,55 @@ int op_reliable_recv(OpReliableCtx *ctx, OverPacketHeader **hdr,
 
     seq = recv_hdr->seq;
 
-    pthread_mutex_lock(mutex);
+    OP_MUTEX_LOCK(mutex);
 
     /* Проверяем, находится ли пакет в окне */
     if (!is_in_window(seq, ctx->recv_base, ctx->window_size)) {
         /* Пакет вне окна - возможно старый или будущий */
         OP_LOG_WARN("Packet seq %u outside receive window [%u, %u)",
                     seq, ctx->recv_base, ctx->recv_base + ctx->window_size);
-        
-        /* Всё равно отправляем ACK */
-        goto send_ack;
-    }
+        OP_MUTEX_UNLOCK(mutex);
+    } else {
+        window_idx = seq_to_window_index(seq, ctx->recv_base, ctx->window_size);
 
-    window_idx = seq_to_window_index(seq, ctx->recv_base, ctx->window_size);
+        /* Проверяем, не получен ли уже этот пакет */
+        if (ctx->recv_window[window_idx] != 0) {
+            /* Дубликат - отправляем ACK, но не обрабатываем */
+            OP_LOG_DEBUG("Duplicate packet seq %u", seq);
+            free(recv_hdr);
+            if (recv_data != NULL) {
+                free(recv_data);
+            }
+            recv_hdr = NULL;
+            recv_data = NULL;
+            recv_data_len = 0;
+        } else {
+            /* Помечаем пакет как полученный */
+            ctx->recv_window[window_idx] = 1;
 
-    /* Проверяем, не получен ли уже этот пакет */
-    if (ctx->recv_window[window_idx] != 0) {
-        /* Дубликат - отправляем ACK, но не обрабатываем */
-        OP_LOG_DEBUG("Duplicate packet seq %u", seq);
-        free(recv_hdr);
-        if (recv_data != NULL) {
-            free(recv_data);
+            /* Если это ожидаемый пакет (recv_base), сдвигаем окно */
+            if (seq == ctx->recv_base) {
+                /* Находим следующий неполученный пакет */
+                while (ctx->recv_window[seq_to_window_index(ctx->recv_base,
+                                                             ctx->recv_base,
+                                                             ctx->window_size)] != 0) {
+                    uint32_t idx = seq_to_window_index(ctx->recv_base,
+                                                        ctx->recv_base,
+                                                        ctx->window_size);
+                    ctx->recv_window[idx] = 0;
+                    ctx->recv_base++;
+                }
+            }
+
+            /* Возвращаем пакет */
+            *hdr = recv_hdr;
+            *data = recv_data;
+            *data_len = recv_data_len;
         }
-        pthread_mutex_unlock(mutex);
-        
-        /* Отправляем ACK без блокировки */
-        goto send_ack_no_lock;
+
+        OP_MUTEX_UNLOCK(mutex);
     }
 
-    /* Помечаем пакет как полученный */
-    ctx->recv_window[window_idx] = 1;
-
-    /* Если это ожидаемый пакет (recv_base), сдвигаем окно */
-    if (seq == ctx->recv_base) {
-        /* Находим следующий неполученный пакет */
-        while (ctx->recv_window[seq_to_window_index(ctx->recv_base,
-                                                     ctx->recv_base,
-                                                     ctx->window_size)] != 0) {
-            uint32_t idx = seq_to_window_index(ctx->recv_base,
-                                                ctx->recv_base,
-                                                ctx->window_size);
-            ctx->recv_window[idx] = 0;
-            ctx->recv_base++;
-        }
-    }
-
-    /* Возвращаем пакет */
-    *hdr = recv_hdr;
-    *data = recv_data;
-    *data_len = recv_data_len;
-
-    pthread_mutex_unlock(mutex);
-
-send_ack:
-    pthread_mutex_unlock(mutex);
-
-send_ack_no_lock:
     /* Отправляем ACK */
     memset(&ack_hdr, 0, sizeof(ack_hdr));
     ack_hdr.magic = OP_MAGIC;
@@ -404,9 +436,12 @@ send_ack_no_lock:
 
     ack_serialized = op_serialize(&ack_hdr, NULL, ack_buf, sizeof(ack_buf));
     if (ack_serialized > 0) {
-        sent = sendto(ctx->fd, ack_buf, (size_t)ack_serialized, 0,
+        sent = sendto(ctx->fd, (const char *)ack_buf, (int)ack_serialized, 0,
                       (const struct sockaddr *)&ctx->addr, ctx->addr_len);
         if (sent < 0) {
+#ifdef _WIN32
+            op_set_socket_errno_from_last_error();
+#endif
             OP_LOG_WARN("Failed to send ACK: %s", strerror(errno));
         }
     }
@@ -416,7 +451,7 @@ send_ack_no_lock:
 
 int op_reliable_process_timeouts(OpReliableCtx *ctx)
 {
-    pthread_mutex_t *mutex;
+    OP_MUTEX_TYPE *mutex;
     time_t now;
     uint32_t i;
     OpWindowSlot *slot;
@@ -427,13 +462,13 @@ int op_reliable_process_timeouts(OpReliableCtx *ctx)
         return -1;
     }
 
-    mutex = (pthread_mutex_t *)ctx->mutex;
+    mutex = (OP_MUTEX_TYPE *)ctx->mutex;
     if (mutex == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    pthread_mutex_lock(mutex);
+    OP_MUTEX_LOCK(mutex);
 
     now = time(NULL);
     if (now == (time_t)-1) {
@@ -460,7 +495,7 @@ int op_reliable_process_timeouts(OpReliableCtx *ctx)
                 }
 
                 /* Ретрансмиссия при timeout */
-                ssize_t sent = sendto(ctx->fd, slot->serialized, slot->serialized_len, 0,
+                ssize_t sent = sendto(ctx->fd, (const char *)slot->serialized, (int)slot->serialized_len, 0,
                                       (const struct sockaddr *)&ctx->addr, ctx->addr_len);
                 if (sent >= 0) {
                     slot->state = OP_PKT_STATE_RETRANSMIT;
@@ -485,18 +520,22 @@ int op_reliable_process_timeouts(OpReliableCtx *ctx)
                                 ctx->cwnd, ctx->ssthresh);
 
                     retransmit_count++;
+                } else {
+#ifdef _WIN32
+                    op_set_socket_errno_from_last_error();
+#endif
                 }
             }
         }
     }
 
-    pthread_mutex_unlock(mutex);
+    OP_MUTEX_UNLOCK(mutex);
     return retransmit_count;
 }
 
 int op_reliable_process_ack(OpReliableCtx *ctx, uint32_t ack_seq)
 {
-    pthread_mutex_t *mutex;
+    OP_MUTEX_TYPE *mutex;
     uint32_t window_idx;
     OpWindowSlot *slot;
     time_t now;
@@ -506,18 +545,18 @@ int op_reliable_process_ack(OpReliableCtx *ctx, uint32_t ack_seq)
         return -1;
     }
 
-    mutex = (pthread_mutex_t *)ctx->mutex;
+    mutex = (OP_MUTEX_TYPE *)ctx->mutex;
     if (mutex == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    pthread_mutex_lock(mutex);
+    OP_MUTEX_LOCK(mutex);
 
     /* Проверяем, находится ли ACK в окне */
     if (!is_in_window(ack_seq, ctx->send_base, ctx->window_size)) {
         /* ACK вне окна - игнорируем */
-        pthread_mutex_unlock(mutex);
+        OP_MUTEX_UNLOCK(mutex);
         return 0;
     }
 
@@ -526,7 +565,7 @@ int op_reliable_process_ack(OpReliableCtx *ctx, uint32_t ack_seq)
 
     if (slot->state == OP_PKT_STATE_EMPTY || slot->header == NULL) {
         /* Пакет уже обработан или не существует */
-        pthread_mutex_unlock(mutex);
+        OP_MUTEX_UNLOCK(mutex);
         return 0;
     }
 
@@ -620,13 +659,13 @@ int op_reliable_process_ack(OpReliableCtx *ctx, uint32_t ack_seq)
         ctx->send_base++;
     }
 
-    pthread_mutex_unlock(mutex);
+    OP_MUTEX_UNLOCK(mutex);
     return 0;
 }
 
 void op_reliable_cleanup(OpReliableCtx *ctx)
 {
-    pthread_mutex_t *mutex;
+    OP_MUTEX_TYPE *mutex;
     uint32_t i;
     OpWindowSlot *slot;
 
@@ -634,10 +673,10 @@ void op_reliable_cleanup(OpReliableCtx *ctx)
         return;
     }
 
-    mutex = (pthread_mutex_t *)ctx->mutex;
+    mutex = (OP_MUTEX_TYPE *)ctx->mutex;
 
     if (mutex != NULL) {
-        pthread_mutex_lock(mutex);
+        OP_MUTEX_LOCK(mutex);
     }
 
     /* Освобождаем все пакеты в окне */
@@ -656,12 +695,11 @@ void op_reliable_cleanup(OpReliableCtx *ctx)
     }
 
     if (mutex != NULL) {
-        pthread_mutex_unlock(mutex);
-        pthread_mutex_destroy(mutex);
+        OP_MUTEX_UNLOCK(mutex);
+        OP_MUTEX_DESTROY(mutex);
         free(mutex);
         ctx->mutex = NULL;
     }
 
     memset(ctx, 0, sizeof(OpReliableCtx));
 }
-

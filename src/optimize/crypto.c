@@ -10,7 +10,20 @@
 #include "../core/common.h"
 #include <string.h>
 #include <stdlib.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#define OP_MUTEX_TYPE SRWLOCK
+#define OP_MUTEX_INITIALIZER SRWLOCK_INIT
+#define OP_MUTEX_LOCK(mtx) AcquireSRWLockExclusive((mtx))
+#define OP_MUTEX_UNLOCK(mtx) ReleaseSRWLockExclusive((mtx))
+#else
 #include <pthread.h>
+#define OP_MUTEX_TYPE pthread_mutex_t
+#define OP_MUTEX_INITIALIZER PTHREAD_MUTEX_INITIALIZER
+#define OP_MUTEX_LOCK(mtx) pthread_mutex_lock((mtx))
+#define OP_MUTEX_UNLOCK(mtx) pthread_mutex_unlock((mtx))
+#endif
 
 #ifdef OVERPROTO_USE_OPENSSL
 #include <openssl/evp.h>
@@ -20,7 +33,7 @@
 /* Глобальный ключ шифрования */
 static uint8_t g_encryption_key[OP_CRYPTO_KEY_SIZE] = {0};
 static int g_key_set = 0;
-static pthread_mutex_t g_key_mutex = PTHREAD_MUTEX_INITIALIZER;
+static OP_MUTEX_TYPE g_key_mutex = OP_MUTEX_INITIALIZER;
 
 int op_set_encryption_key(const uint8_t key[OP_CRYPTO_KEY_SIZE])
 {
@@ -29,10 +42,10 @@ int op_set_encryption_key(const uint8_t key[OP_CRYPTO_KEY_SIZE])
         return -1;
     }
 
-    pthread_mutex_lock(&g_key_mutex);
+    OP_MUTEX_LOCK(&g_key_mutex);
     memcpy(g_encryption_key, key, OP_CRYPTO_KEY_SIZE);
     g_key_set = 1;
-    pthread_mutex_unlock(&g_key_mutex);
+    OP_MUTEX_UNLOCK(&g_key_mutex);
 
     OP_LOG_INFO("Encryption key set (AES-256-GCM)");
     return 0;
@@ -58,9 +71,9 @@ int op_encrypt(const void *input, size_t input_len,
         return 0;
     }
 
-    pthread_mutex_lock(&g_key_mutex);
+    OP_MUTEX_LOCK(&g_key_mutex);
     if (!g_key_set) {
-        pthread_mutex_unlock(&g_key_mutex);
+        OP_MUTEX_UNLOCK(&g_key_mutex);
         OP_LOG_ERROR("Encryption key not set");
         errno = EINVAL;
         return -1;
@@ -69,7 +82,7 @@ int op_encrypt(const void *input, size_t input_len,
     /* Создаём контекст шифрования */
     ctx = EVP_CIPHER_CTX_new();
     if (ctx == NULL) {
-        pthread_mutex_unlock(&g_key_mutex);
+        OP_MUTEX_UNLOCK(&g_key_mutex);
         OP_LOG_ERROR("Failed to create encryption context");
         errno = ENOMEM;
         return -1;
@@ -78,7 +91,7 @@ int op_encrypt(const void *input, size_t input_len,
     /* Генерируем случайный IV */
     if (RAND_bytes(iv, OP_CRYPTO_IV_SIZE) != 1) {
         EVP_CIPHER_CTX_free(ctx);
-        pthread_mutex_unlock(&g_key_mutex);
+        OP_MUTEX_UNLOCK(&g_key_mutex);
         OP_LOG_ERROR("Failed to generate IV: %s", ERR_error_string(ERR_get_error(), NULL));
         errno = EAGAIN;
         return -1;
@@ -87,13 +100,13 @@ int op_encrypt(const void *input, size_t input_len,
     /* Инициализируем шифрование */
     if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, g_encryption_key, iv) != 1) {
         EVP_CIPHER_CTX_free(ctx);
-        pthread_mutex_unlock(&g_key_mutex);
+        OP_MUTEX_UNLOCK(&g_key_mutex);
         OP_LOG_ERROR("Failed to initialize encryption: %s", ERR_error_string(ERR_get_error(), NULL));
         errno = EINVAL;
         return -1;
     }
 
-    pthread_mutex_unlock(&g_key_mutex);
+    OP_MUTEX_UNLOCK(&g_key_mutex);
 
     /* Вычисляем размер выходного буфера */
     /* IV + encrypted data + tag */
@@ -187,9 +200,9 @@ int op_decrypt(const void *input, size_t input_len,
     /* Используем IV из входных данных, если не передан отдельно */
     const uint8_t *use_iv = (iv != NULL) ? iv : input_iv;
 
-    pthread_mutex_lock(&g_key_mutex);
+    OP_MUTEX_LOCK(&g_key_mutex);
     if (!g_key_set) {
-        pthread_mutex_unlock(&g_key_mutex);
+        OP_MUTEX_UNLOCK(&g_key_mutex);
         OP_LOG_ERROR("Encryption key not set");
         errno = EINVAL;
         return -1;
@@ -198,7 +211,7 @@ int op_decrypt(const void *input, size_t input_len,
     /* Создаём контекст дешифрования */
     ctx = EVP_CIPHER_CTX_new();
     if (ctx == NULL) {
-        pthread_mutex_unlock(&g_key_mutex);
+        OP_MUTEX_UNLOCK(&g_key_mutex);
         OP_LOG_ERROR("Failed to create decryption context");
         errno = ENOMEM;
         return -1;
@@ -207,13 +220,13 @@ int op_decrypt(const void *input, size_t input_len,
     /* Инициализируем дешифрование */
     if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, g_encryption_key, use_iv) != 1) {
         EVP_CIPHER_CTX_free(ctx);
-        pthread_mutex_unlock(&g_key_mutex);
+        OP_MUTEX_UNLOCK(&g_key_mutex);
         OP_LOG_ERROR("Failed to initialize decryption: %s", ERR_error_string(ERR_get_error(), NULL));
         errno = EINVAL;
         return -1;
     }
 
-    pthread_mutex_unlock(&g_key_mutex);
+    OP_MUTEX_UNLOCK(&g_key_mutex);
 
     /* Выделяем буфер для расшифрованных данных */
     decrypted_size = encrypted_len;  /* Примерный размер (может быть немного меньше) */
@@ -268,19 +281,19 @@ int op_is_encryption_enabled(void)
 {
     int enabled;
 
-    pthread_mutex_lock(&g_key_mutex);
+    OP_MUTEX_LOCK(&g_key_mutex);
     enabled = g_key_set;
-    pthread_mutex_unlock(&g_key_mutex);
+    OP_MUTEX_UNLOCK(&g_key_mutex);
 
     return enabled;
 }
 
 void op_clear_encryption_key(void)
 {
-    pthread_mutex_lock(&g_key_mutex);
+    OP_MUTEX_LOCK(&g_key_mutex);
     memset(g_encryption_key, 0, OP_CRYPTO_KEY_SIZE);
     g_key_set = 0;
-    pthread_mutex_unlock(&g_key_mutex);
+    OP_MUTEX_UNLOCK(&g_key_mutex);
 
     OP_LOG_INFO("Encryption key cleared");
 }
@@ -334,4 +347,3 @@ void op_clear_encryption_key(void)
 }
 
 #endif /* OVERPROTO_USE_OPENSSL */
-

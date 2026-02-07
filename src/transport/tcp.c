@@ -10,13 +10,18 @@
  */
 
 #include "tcp.h"
+#include <string.h>
+#include <stdlib.h>
+#include <errno.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <string.h>
-#include <stdlib.h>
-#include <errno.h>
+#endif
 
 #define OP_TCP_BACKLOG 10
 #define OP_TCP_RECV_BUFFER_SIZE (64 * 1024)  /* 64KB буфер по умолчанию */
@@ -29,20 +34,44 @@
  * @return Количество прочитанных байт при успехе, -1 при ошибке, 0 при EOF
  * @note Блокирует до чтения len байт или ошибки/EOF
  */
-static ssize_t read_exact(int fd, void *buf, size_t len)
+#ifdef _WIN32
+static void op_set_socket_errno_from_last_error(void)
+{
+    switch (WSAGetLastError()) {
+    case WSAEWOULDBLOCK: errno = EWOULDBLOCK; break;
+    case WSAEINTR: errno = EINTR; break;
+    case WSAECONNRESET: errno = ECONNRESET; break;
+    case WSAECONNABORTED: errno = ECONNABORTED; break;
+    case WSAENOTCONN: errno = ENOTCONN; break;
+    case WSAETIMEDOUT: errno = ETIMEDOUT; break;
+    case WSAEADDRINUSE: errno = EADDRINUSE; break;
+    case WSAEADDRNOTAVAIL: errno = EADDRNOTAVAIL; break;
+    case WSAECONNREFUSED: errno = ECONNREFUSED; break;
+    case WSAEHOSTUNREACH: errno = EHOSTUNREACH; break;
+    case WSAENETUNREACH: errno = ENETUNREACH; break;
+    case WSAENOBUFS: errno = ENOBUFS; break;
+    default: errno = EIO; break;
+    }
+}
+#endif
+
+static ssize_t read_exact(op_socket_t fd, void *buf, size_t len)
 {
     uint8_t *ptr = (uint8_t *)buf;
     size_t total_read = 0;
     ssize_t n;
 
     while (total_read < len) {
-        n = read(fd, ptr + total_read, len - total_read);
+        n = recv(fd, (char *)(ptr + total_read), (int)(len - total_read), 0);
         
         if (n < 0) {
+#ifdef _WIN32
+            op_set_socket_errno_from_last_error();
+#endif
             if (errno == EINTR) {
                 continue;  /* Перезапускаем системный вызов */
             }
-            OP_LOG_ERROR("read() failed: %s", strerror(errno));
+            OP_LOG_ERROR("recv() failed: %s", strerror(errno));
             return -1;
         }
         
@@ -65,16 +94,19 @@ static ssize_t read_exact(int fd, void *buf, size_t len)
  * @return Количество отправленных байт при успехе, -1 при ошибке
  * @note Блокирует до отправки len байт или ошибки
  */
-static ssize_t send_exact(int fd, const void *buf, size_t len)
+static ssize_t send_exact(op_socket_t fd, const void *buf, size_t len)
 {
     const uint8_t *ptr = (const uint8_t *)buf;
     size_t total_sent = 0;
     ssize_t n;
 
     while (total_sent < len) {
-        n = send(fd, ptr + total_sent, len - total_sent, 0);
+        n = send(fd, (const char *)(ptr + total_sent), (int)(len - total_sent), 0);
         
         if (n < 0) {
+#ifdef _WIN32
+            op_set_socket_errno_from_last_error();
+#endif
             if (errno == EINTR) {
                 continue;  /* Перезапускаем системный вызов */
             }
@@ -99,23 +131,33 @@ static ssize_t send_exact(int fd, const void *buf, size_t len)
     return (ssize_t)total_sent;
 }
 
-int op_tcp_listen(uint16_t port)
+op_socket_t op_tcp_listen(uint16_t port)
 {
-    int fd;
+    op_socket_t fd;
     struct sockaddr_in addr;
     int opt = 1;
 
     fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
+    if (fd == OP_INVALID_SOCKET) {
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         OP_LOG_ERROR("socket() failed: %s", strerror(errno));
-        return -1;
+        return OP_INVALID_SOCKET;
     }
 
     /* Устанавливаем SO_REUSEADDR для переиспользования порта */
+#ifdef _WIN32
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt)) < 0) {
+#else
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+#endif
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         OP_LOG_WARN("setsockopt(SO_REUSEADDR) failed: %s", strerror(errno));
-        close(fd);
-        return -1;
+        op_tcp_close(fd);
+        return OP_INVALID_SOCKET;
     }
 
     memset(&addr, 0, sizeof(addr));
@@ -124,54 +166,70 @@ int op_tcp_listen(uint16_t port)
     addr.sin_port = htons(port);
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         OP_LOG_ERROR("bind() failed on port %u: %s", port, strerror(errno));
-        close(fd);
-        return -1;
+        op_tcp_close(fd);
+        return OP_INVALID_SOCKET;
     }
 
     if (listen(fd, OP_TCP_BACKLOG) < 0) {
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         OP_LOG_ERROR("listen() failed: %s", strerror(errno));
-        close(fd);
-        return -1;
+        op_tcp_close(fd);
+        return OP_INVALID_SOCKET;
     }
 
     OP_LOG_INFO("TCP server listening on port %u", port);
     return fd;
 }
 
-int op_tcp_accept(int server_fd)
+op_socket_t op_tcp_accept(op_socket_t server_fd)
 {
     struct sockaddr_in addr;
     socklen_t addr_len = sizeof(addr);
-    int client_fd;
+    op_socket_t client_fd;
+    char ip_addr[INET_ADDRSTRLEN] = {0};
 
     client_fd = accept(server_fd, (struct sockaddr *)&addr, &addr_len);
-    if (client_fd < 0) {
+    if (client_fd == OP_INVALID_SOCKET) {
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             OP_LOG_ERROR("accept() failed: %s", strerror(errno));
         }
-        return -1;
+        return OP_INVALID_SOCKET;
     }
 
+    if (inet_ntop(AF_INET, &addr.sin_addr, ip_addr, sizeof(ip_addr)) == NULL) {
+        strncpy(ip_addr, "unknown", sizeof(ip_addr) - 1);
+    }
     OP_LOG_INFO("TCP connection accepted from %s:%u",
-                inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
+                ip_addr, ntohs(addr.sin_port));
     return client_fd;
 }
 
-int op_tcp_connect(const char *host, uint16_t port)
+op_socket_t op_tcp_connect(const char *host, uint16_t port)
 {
-    int fd;
+    op_socket_t fd;
     struct sockaddr_in addr;
 
     if (host == NULL) {
         errno = EINVAL;
-        return -1;
+        return OP_INVALID_SOCKET;
     }
 
     fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
+    if (fd == OP_INVALID_SOCKET) {
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         OP_LOG_ERROR("socket() failed: %s", strerror(errno));
-        return -1;
+        return OP_INVALID_SOCKET;
     }
 
     memset(&addr, 0, sizeof(addr));
@@ -180,24 +238,27 @@ int op_tcp_connect(const char *host, uint16_t port)
 
     if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0) {
         OP_LOG_ERROR("Invalid IP address: %s", host);
-        close(fd);
+        op_tcp_close(fd);
         errno = EINVAL;
-        return -1;
+        return OP_INVALID_SOCKET;
     }
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+#ifdef _WIN32
+        op_set_socket_errno_from_last_error();
+#endif
         OP_LOG_ERROR("connect() failed to %s:%u: %s", host, port, strerror(errno));
-        close(fd);
-        return -1;
+        op_tcp_close(fd);
+        return OP_INVALID_SOCKET;
     }
 
     OP_LOG_INFO("TCP connected to %s:%u", host, port);
     return fd;
 }
 
-int op_tcp_connection_init(OpTcpConnection *conn, int fd)
+int op_tcp_connection_init(OpTcpConnection *conn, op_socket_t fd)
 {
-    if (conn == NULL || fd < 0) {
+    if (conn == NULL || fd == OP_INVALID_SOCKET) {
         errno = EINVAL;
         return -1;
     }
@@ -228,20 +289,20 @@ void op_tcp_connection_cleanup(OpTcpConnection *conn)
         conn->recv_buffer = NULL;
     }
 
-    conn->fd = -1;
+    conn->fd = OP_INVALID_SOCKET;
     conn->recv_state = OP_TCP_STATE_IDLE;
     conn->recv_buffer_size = 0;
     conn->recv_bytes_read = 0;
 }
 
-ssize_t op_tcp_send(int fd, const OverPacketHeader *hdr, const void *data)
+ssize_t op_tcp_send(op_socket_t fd, const OverPacketHeader *hdr, const void *data)
 {
     uint8_t *send_buf = NULL;
     size_t send_buf_size;
     ssize_t result;
     ssize_t bytes_sent;
 
-    if (fd < 0 || hdr == NULL) {
+    if (fd == OP_INVALID_SOCKET || hdr == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -285,7 +346,7 @@ int op_tcp_recv(OpTcpConnection *conn,
     size_t total_packet_size;
     int result;
 
-    if (conn == NULL || conn->fd < 0 || hdr == NULL || data == NULL || data_len == NULL) {
+    if (conn == NULL || conn->fd == OP_INVALID_SOCKET || hdr == NULL || data == NULL || data_len == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -412,18 +473,22 @@ int op_tcp_recv(OpTcpConnection *conn,
     }
 }
 
-int op_tcp_close(int fd)
+int op_tcp_close(op_socket_t fd)
 {
-    if (fd < 0) {
+    if (fd == OP_INVALID_SOCKET) {
         errno = EINVAL;
         return -1;
     }
 
+ #ifdef _WIN32
+    if (closesocket(fd) != 0) {
+        op_set_socket_errno_from_last_error();
+ #else
     if (close(fd) < 0) {
+ #endif
         OP_LOG_ERROR("close() failed: %s", strerror(errno));
         return -1;
     }
 
     return 0;
 }
-

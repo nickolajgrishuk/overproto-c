@@ -11,29 +11,55 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <windows.h>
+#define OP_MUTEX_TYPE SRWLOCK
+#define OP_MUTEX_INITIALIZER SRWLOCK_INIT
+#define OP_MUTEX_LOCK(mtx) AcquireSRWLockExclusive((mtx))
+#define OP_MUTEX_UNLOCK(mtx) ReleaseSRWLockExclusive((mtx))
+#else
 #include <pthread.h>
+#define OP_MUTEX_TYPE pthread_mutex_t
+#define OP_MUTEX_INITIALIZER PTHREAD_MUTEX_INITIALIZER
+#define OP_MUTEX_LOCK(mtx) pthread_mutex_lock((mtx))
+#define OP_MUTEX_UNLOCK(mtx) pthread_mutex_unlock((mtx))
+#endif
 
 /* Глобальная конфигурация */
 static OpConfig g_config;
 static int g_initialized = 0;
-static pthread_mutex_t g_config_mutex = PTHREAD_MUTEX_INITIALIZER;
+static OP_MUTEX_TYPE g_config_mutex = OP_MUTEX_INITIALIZER;
 
 /* Callback для приёма пакетов */
 static op_recv_cb g_recv_callback = NULL;
 static void *g_recv_ctx = NULL;
-static pthread_mutex_t g_callback_mutex = PTHREAD_MUTEX_INITIALIZER;
+static OP_MUTEX_TYPE g_callback_mutex = OP_MUTEX_INITIALIZER;
 
 int op_init(const OpConfig *cfg)
 {
     int result = 0;
 
-    pthread_mutex_lock(&g_config_mutex);
+    OP_MUTEX_LOCK(&g_config_mutex);
 
     if (g_initialized) {
         OP_LOG_WARN("OverProto already initialized");
-        pthread_mutex_unlock(&g_config_mutex);
+        OP_MUTEX_UNLOCK(&g_config_mutex);
         return 0;
     }
+
+#ifdef _WIN32
+    {
+        WSADATA wsa_data;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+            errno = EIO;
+            OP_MUTEX_UNLOCK(&g_config_mutex);
+            OP_LOG_ERROR("WSAStartup() failed");
+            return -1;
+        }
+    }
+#endif
 
     if (cfg != NULL) {
         memcpy(&g_config, cfg, sizeof(OpConfig));
@@ -46,43 +72,47 @@ int op_init(const OpConfig *cfg)
     OP_LOG_INFO("OverProto initialized (TCP port: %u, UDP port: %u)",
                 g_config.tcp_port, g_config.udp_port);
 
-    pthread_mutex_unlock(&g_config_mutex);
+    OP_MUTEX_UNLOCK(&g_config_mutex);
     return result;
 }
 
 void op_shutdown(void)
 {
-    pthread_mutex_lock(&g_config_mutex);
+    OP_MUTEX_LOCK(&g_config_mutex);
 
     if (!g_initialized) {
-        pthread_mutex_unlock(&g_config_mutex);
+        OP_MUTEX_UNLOCK(&g_config_mutex);
         return;
     }
 
     /* Сбрасываем callback */
-    pthread_mutex_lock(&g_callback_mutex);
+    OP_MUTEX_LOCK(&g_callback_mutex);
     g_recv_callback = NULL;
     g_recv_ctx = NULL;
-    pthread_mutex_unlock(&g_callback_mutex);
+    OP_MUTEX_UNLOCK(&g_callback_mutex);
 
     /* Сбрасываем конфигурацию */
     memset(&g_config, 0, sizeof(OpConfig));
     g_initialized = 0;
 
+#ifdef _WIN32
+    WSACleanup();
+#endif
+
     OP_LOG_INFO("OverProto shut down");
 
-    pthread_mutex_unlock(&g_config_mutex);
+    OP_MUTEX_UNLOCK(&g_config_mutex);
 }
 
 void op_set_handler(op_recv_cb callback, void *ctx)
 {
-    pthread_mutex_lock(&g_callback_mutex);
+    OP_MUTEX_LOCK(&g_callback_mutex);
     g_recv_callback = callback;
     g_recv_ctx = ctx;
-    pthread_mutex_unlock(&g_callback_mutex);
+    OP_MUTEX_UNLOCK(&g_callback_mutex);
 }
 
-ssize_t op_send(int fd, uint32_t stream_id, uint8_t opcode, uint8_t proto,
+ssize_t op_send(op_socket_t fd, uint32_t stream_id, uint8_t opcode, uint8_t proto,
                 const void *data, size_t len, uint8_t flags)
 {
     OverPacketHeader hdr;
@@ -99,7 +129,7 @@ ssize_t op_send(int fd, uint32_t stream_id, uint8_t opcode, uint8_t proto,
     int free_compressed = 0;
     int free_encrypted = 0;
 
-    if (fd < 0) {
+    if (fd == OP_INVALID_SOCKET) {
         errno = EINVAL;
         return -1;
     }
@@ -215,4 +245,3 @@ ssize_t op_send(int fd, uint32_t stream_id, uint8_t opcode, uint8_t proto,
 /* Функция op_set_encryption_key реализована в src/optimize/crypto.c */
 
 /* Функции op_udp_bind и op_udp_connect реализованы в src/transport/udp.c */
-

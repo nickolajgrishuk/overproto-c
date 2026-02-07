@@ -34,13 +34,14 @@ OverProto is a lightweight C library for creating network applications with adva
 
 - **Compiler**: GCC or Clang with C99 support
 - **CMake**: version 3.10 or higher
-- **pthread**: for thread-safe operations
+- **POSIX threads** on Linux / native Win32 synchronization on Windows
+- **Winsock2** on Windows (linked automatically via `ws2_32`)
 - **zlib** (optional): for data compression
 - **OpenSSL** (optional): for data encryption
 
 ## Installation
 
-### Building from Source
+### Linux Build
 
 ```bash
 git clone https://github.com/nickolajgrishuk/overproto.git
@@ -58,11 +59,25 @@ cmake .. \
 make && sudo make install
 ```
 
+### Windows Cross-Build (MinGW-w64 from Linux)
+
+```bash
+cmake -S . -B build_mingw \
+    -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64.cmake \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DOVERPROTO_WITH_ZLIB=OFF \
+    -DOVERPROTO_WITH_OPENSSL=OFF \
+    -DOVERPROTO_BUILD_EXAMPLES=ON
+
+cmake --build build_mingw -j
+```
+
 ### CMake Options
 
 - `OVERPROTO_WITH_ZLIB` (ON/OFF) - enable zlib compression support (default: ON)
 - `OVERPROTO_WITH_OPENSSL` (ON/OFF) - enable OpenSSL encryption support (default: OFF)
 - `OVERPROTO_BUILD_EXAMPLES` (ON/OFF) - build usage examples (default: OFF)
+- `CMAKE_TOOLCHAIN_FILE=cmake/toolchains/mingw-w64.cmake` - cross-build for Windows with MinGW-w64
 
 ## Usage
 
@@ -82,8 +97,8 @@ int main(void) {
         return 1;
     }
 
-    int fd = op_tcp_connect("127.0.0.1", 8080);
-    if (fd < 0) {
+    op_socket_t fd = op_tcp_connect("127.0.0.1", 8080);
+    if (fd == OP_INVALID_SOCKET) {
         fprintf(stderr, "Failed to connect\n");
         op_shutdown();
         return 1;
@@ -128,8 +143,8 @@ int main(void) {
 
     op_set_handler(recv_handler, NULL);
 
-    int server_fd = op_tcp_listen(8080);
-    if (server_fd < 0) {
+    op_socket_t server_fd = op_tcp_listen(8080);
+    if (server_fd == OP_INVALID_SOCKET) {
         fprintf(stderr, "Failed to listen\n");
         op_shutdown();
         return 1;
@@ -137,8 +152,8 @@ int main(void) {
 
     printf("Server listening on port 8080\n");
 
-    int client_fd = op_tcp_accept(server_fd);
-    if (client_fd < 0) {
+    op_socket_t client_fd = op_tcp_accept(server_fd);
+    if (client_fd == OP_INVALID_SOCKET) {
         op_tcp_close(server_fd);
         op_shutdown();
         return 1;
@@ -189,25 +204,25 @@ ssize_t sent = op_send(fd, 1, OP_DATA, OP_PROTO_TCP,
 
 ### Sending and Receiving
 
-- `ssize_t op_send(int fd, uint32_t stream_id, uint8_t opcode, uint8_t proto, const void *data, size_t len, uint8_t flags)` - send a packet
+- `ssize_t op_send(op_socket_t fd, uint32_t stream_id, uint8_t opcode, uint8_t proto, const void *data, size_t len, uint8_t flags)` - send a packet
 - `void op_set_handler(op_recv_cb callback, void *ctx)` - set packet receive handler
 
 ### TCP Transport
 
-- `int op_tcp_listen(uint16_t port)` - create TCP server
-- `int op_tcp_accept(int server_fd)` - accept a connection
-- `int op_tcp_connect(const char *host, uint16_t port)` - connect to server
-- `ssize_t op_tcp_send(int fd, const OverPacketHeader *hdr, const void *data)` - send via TCP
+- `op_socket_t op_tcp_listen(uint16_t port)` - create TCP server
+- `op_socket_t op_tcp_accept(op_socket_t server_fd)` - accept a connection
+- `op_socket_t op_tcp_connect(const char *host, uint16_t port)` - connect to server
+- `ssize_t op_tcp_send(op_socket_t fd, const OverPacketHeader *hdr, const void *data)` - send via TCP
 - `int op_tcp_recv(OpTcpConnection *conn, OverPacketHeader **hdr, void **data, size_t *data_len)` - receive via TCP
-- `int op_tcp_close(int fd)` - close TCP connection
+- `int op_tcp_close(op_socket_t fd)` - close TCP connection
 
 ### UDP Transport
 
-- `int op_udp_bind(uint16_t port)` - bind UDP socket to port
-- `int op_udp_connect(const char *host, uint16_t port)` - connect UDP socket
-- `ssize_t op_udp_send(int fd, const OverPacketHeader *hdr, const void *data, const struct sockaddr_in *addr, socklen_t addr_len)` - send via UDP
-- `int op_udp_recv(int fd, OverPacketHeader **hdr, void **data, size_t *data_len, struct sockaddr_in *addr, socklen_t *addr_len)` - receive via UDP
-- `int op_udp_close(int fd)` - close UDP socket
+- `op_socket_t op_udp_bind(uint16_t port)` - bind UDP socket to port
+- `op_socket_t op_udp_connect(const char *host, uint16_t port)` - connect UDP socket
+- `ssize_t op_udp_send(op_socket_t fd, const OverPacketHeader *hdr, const void *data, const struct sockaddr_in *addr, socklen_t addr_len)` - send via UDP
+- `int op_udp_recv(op_socket_t fd, OverPacketHeader **hdr, void **data, size_t *data_len, struct sockaddr_in *addr, socklen_t *addr_len)` - receive via UDP
+- `int op_udp_close(op_socket_t fd)` - close UDP socket
 
 ### Security
 
